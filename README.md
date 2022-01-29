@@ -132,3 +132,106 @@ where **H** is homography matrix returned as a result of `cv2.getPerspectiveTran
 
 
 
+##Estimating pixel resolution
+Next important step is to estimate resolution in pixels per meter of the warped image. It also can be done by hand, but as previously we'll create a script that does that for us. In the course materials, it was stated that width of the lane is no less than 12 feet. In order to estimate the resolution in pixels per meter, the images with the straight lines will be used. They will be unwarped and the distance between the lines will be measured. The lower of two distances will be assumed to be 12 feet or 3.6576 meters. 
+
+To start, the images with the straight lines would be unwarped and color would be converted to HLS space. To find the lanes the threshold would be applied to the luminesence component. Also, only some region of interest is taken into account. Since lines were straight heading towards the vanishing point, after the warping they will be vertical. The centroids of the blobs on left and right images would be calculated using image moments and function `cv2.moments()`. Since the lane lines are vertical the width of the lane in pixels is the difference between the *x* coordinates of two centroids. That allows for the calculation of the width in pixels and then resolution in *x* direction. This procedure is implemented between line 71 and 
+91 of the script `find_perspective_transform.py`. The images that illustrate the procedure are shown below.
+
+| Warped image with parallel lane lines| Thresholded luminesence  |Lane with lines identified|
+|--------------------------------------|--------------------------|--------------------------|
+|![alt text][image11]                  |![alt text][image12]      |![alt text][image13]      |
+
+That is how to find resolution in *x* direction, but for finding resolution in *y* there is no such trick. Since nothing was estimated manually neither this will be. The camera matrix obtained by calibrations holds some relative information about resolutions in *x* and *y* direction. We can try to exploit that. To find resolution in *y* direction we have to do some more math. 
+
+Lets say, we have a coordinate frame attached to the road, as shown on image below. It is easy to see that transformation of the coordinates represented in the coordinate frame of the road to the coordinate frame of the warped image, consists of scaling and shifted. Scale in *x* direction corresponds to the number of pixel per meter in *x* direction. Same holds for *y*. In mathemathical form that can be written as:
+<p align="center">
+<img src="https://latex.codecogs.com/svg.latex?\begin{bmatrix}u_w\\v_w\\1\end{bmatrix}=\begin{bmatrix}r_x&0&c_x\\0&r_y&c_y\\0&0&1\end{bmatrix}\begin{bmatrix}X_r\\Y_r\\1\end{bmatrix}" alt="{mathcode}">
+</p>
+
+| Road frame as seen by camera| Road frame on warped image |
+|-----------------------------|----------------------------|
+|![alt text][image14]         |![alt text][image15]        |
+
+
+The same thing can be calculated from the other side. Lets say that position and of the road coordinate frame in camera coordinate frame is given with rotation matrix **R**=*[r<sub>1</sub> r<sub>2</sub> r<sub>3</sub>]* and translation vector *t*. One important property that is going to be exploited is that matrix **R** is orthogonal, meaning that each of the rows *r<sub>1</sub>, r<sub>2</sub>, r<sub>3</sub>* has the length of 1. Now since we know that, the pixel on the image that corresponds to the point with coordinates *X<sub>r</sub>, Y<sub>r</sub>* and *Z<sub>r</sub>* is calculated by:
+<p align="center">
+<img src="https://latex.codecogs.com/svg.latex?\begin{bmatrix}u\\v\\1\end{bmatrix}=s\mathbf{M}\left[r_1\;r_2\;r_3\;t\right]\begin{bmatrix}X_r\\Y_r\\Z_r\\1\end{bmatrix}" alt="{mathcode}">
+</p>
+
+Since the road is planar, the *Z<sub>r</sub>=0*. Now we apply the perspective transform and get:
+<p align="center">
+<img src="https://latex.codecogs.com/svg.latex?\begin{bmatrix}u_w\\v_w\\1\end{bmatrix}=s\mathbf{H}\mathbf{M}\left[r_1\;r_2\;t\right]\begin{bmatrix}X_r\\Y_r\\1\end{bmatrix}=\begin{bmatrix}r_x&0&c_x\\0&r_y&c_y\\0&0&1\end{bmatrix}\begin{bmatrix}X_r\\Y_r\\1\end{bmatrix}" alt="{mathcode}">
+</p>
+Since it has to hold for every point we can conclude that:
+<p align="center">
+<img src="https://latex.codecogs.com/svg.latex?s\left[r_1\;r_2\;t\right]=(\mathbf{H}\mathbf{M})^{-1}\left\begin{bmatrix}r_x&0&c_x\\0&r_y&c_y\\0&0&1\end{bmatrix}=[h_1\;h_2\;h_3]\begin{bmatrix}r_x&0&c_x\\0&r_y&c_y\\0&0&1\end{bmatrix}" alt="{mathcode}">
+</p>
+
+Where *h<sub>1</sub>, h<sub>2</sub>, h<sub>3</sub>* are columns of matrix (**HM**)*<sup>-1*. Since the length of vectors *r<sub>1</sub>* and *r<sub>2</sub>* is one, we can calculate scalar *s* and finally *r<sub>y</sub>*:
+<p align="center">
+<img src="https://latex.codecogs.com/svg.latex?r_y=r_x\frac{\left||h_1\right||}{\left||h_2\right||}" alt="{mathcode}">
+</p>
+
+The rather simple equation is obtained at the end, but it took us a while to get there. This calculation is implemented in lines 91 and 92 of script `find_perspective_transform.py`. The final result is:
+
+
+| pix/meter in *x* direction | pix/meter in *y* direction | 
+|----------------------------|----------------------------|
+|46.567                         |      33.0652548749         |
+
+----
+
+## Finding lane lines
+
+The pipeline is implemented in the class `LaneFinder` that does the lane finding and it is written in the file `lane_finder.py`. This class has two instances of subclass `LaneLineFinder` which is used to find a single line. The parts of the pipeline that have to be performed once (masking, calculating curvature, drawing an overlay etc...) on a whole image are encapsulated in the `LaneFinder`. The parts that have to be performed twice (fitting the line on a binary image), once for each line is encapsulated in `LaneLineFinder`. For easier explanation first, the functionality used for the single images will be explained. The pipeline for the video is almost the same, while some additional filtering is included.
+
+
+
+### Single images
+The pipeline for single images goes through several steps. Let us see how initial image looks:
+![alt text][image16]
+
+####1. Image undistortion, warping and color space conversion.
+The image gets undistorted first, then the perspective transformation is applied to the undistorted image. After that, the images is converted into HLS and LAB color space. L channels of both HLS and LAB channels will be used to track the bright regions of the image, while B channel is used to track the yellow lines on the image. Also, some filtering is performed to reduce the noise, `cv2.medianBlur()` is used since it maintains the edges. Also for the use of the harder challenge video, the greenish areas are unmasked. Part of the code that performs this is from line 187 to 220. The undistorted and warped images are:
+
+| Undistorted original image  | Warped undistorted image   |
+|-----------------------------|----------------------------|
+|![alt text][image17]         |![alt text][image18]        |
+
+####2. Finding bright or yellow areas
+To find the bright or yellow areas, the morphological TOP HAT operation is used. It isolates the areas brighter than their surroundings. This operation is used in order to make pipeline robust against the lighting changes. In selected case, the lightness of the road surface changes, but we'll see that it does not affect the tophat morphological operation. The edge detection not used since they are extremely affected by the noise on the image, which makes them unsuitable for harder challenges. After applying TOP HAT operation, the image is thresholded using adaptive threshold which adds a bit more to the overall robustness. This part is implemented in lines 225 to 237. The resulting images are:
+
+| Tophat on L channel from LAB| Tophat on L channel from HLS  |Tophat on B channel from LAB|
+|-----------------------------|-------------------------------|----------------------------|
+|![alt text][image19]         |![alt text][image20]           |![alt text][image21]        |
+| Tophat on L channel from LAB| Tophat on L channel from HLS  |Tophat on B channel from LAB|
+|![alt text][image22]         |![alt text][image23]           |![alt text][image24]        |
+
+
+####3. Calculating single mask and passing it to the `LaneLineFinder`
+Once the masks are calculated, logical *or* is applied between them in order to obtain the total mask. Since the threshold is kept quite low, there will be a lot of noise. To avoid noise interfering with lane finding procedure, the mask is eroded which removes all the regions smaller than the structuring element. Once that is finished the masks are passed to `LaneLineFinder` which actually looks for the line in the binary image. This part is implemented from line 236 to line 248. The results are:
+
+| Total mask           |     Eroded mask      |
+|----------------------|----------------------|
+|![alt text][image25]  |![alt text][image26]  |
+
+####4. Finding the line in a mask and fitting polynomial
+When the mask is found, the search for the line begins. The initial point to start a search is somewhere 1.82 meters (6 feet). Under the assumption that lane is 12feet wide and that the car is in its middle, we would be spot on. Since that might not hold, the search is performed in its surroundings. The window at the bottom of the image with the highest number of points included found. After that, we go one layer up and perform the same search but right now, we start from the maximum from the layer below. The search is performed until the top of the image is reached, gradually eliminating points outside of the maximal region. Function that does this is `LaneLineFinder.find_lane_line()`. After the lane points have been isolated, the polynomial fit is performed using `LaneLineFinder.fit_lane_line()`. In that procedures some statistics are calculated which help determine if the found line is good or not. The statistics include:
+ 1. Number of points in the fit 
+ 2. Quality of the fit calculated using covariance matrix returned by `numpy.polyfit`
+ 3. Curvature of the road
+ 4. How far lane is from the center of the car
+
+All of these have to be above some empirically defined threshold. The maximal regions and points used for fitting are shown in the image below (red is for left, blue is for right line):
+
+| Line mask            |     Line points      |
+|----------------------|----------------------|
+|![alt text][image27]  |![alt text][image28]  |
+
+####5. Draw lane on original image and calculate curvature
+If lanes are found, the curvature and position of the centre of the car is calculated using functions `get_curvature()` and `get_center_shift()`. Since the two lines are present, for the coefficient of the polynomial the mean value is used. The *y* coordinate for which the polynomials are evaluated is the bottom of the image. After that, the lines are drawn on a warped image and then unwarped and added to the original image. The last thing is to print out the values of curvature and offset of the center of the car. Results for all provided images can be found in [output_images](./images/output_images). Here is the result for discussed case:
+
+| Warped lines         |     Final result    |
+|----------------------|----------------------|
+|![alt text][image29]  |![alt text][image30]  |

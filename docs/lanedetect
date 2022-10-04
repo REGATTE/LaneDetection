@@ -1,0 +1,548 @@
+Introduction
+In this post, we’ll be doing a deep dive on the techniques that I’ve learned for a very simple lane detection algorithm. The problem we solve in this post is to take a simple video as input data and process it to detect the lane within which the vehicle is moving. Then we will find a representative line for both the left and right lane lines and render those representations back out to the video as a red overlay. This post will be heavy on technical details about how to use the libraries available in the Python computer vision ecosystem to solve this problem.
+
+Computer vision is an area of computer science devoted to the extraction and processing of structured information from mostly-unstructured image data. We are going to use OpenCV to process the input images to discover any lane lines held within and also for rendering out a representation of the lane. Additionally, images are really just dense matrix data, so we will use numpy and matplotlib to do transformations and rendering of image data. I’ve run all of this code within a Jupyter notebook, but you can run it in any environment that allows you to install the dependencies and execute python scripts.
+
+By the end of this post, you will have learned how to write a program that can do the conversion below.
+
+
+From raw image to rendered lane lines
+Solving an Easier Problem
+First of all, one obvious way to make the problem easier is to work out our solution for a single image. A video is, after all, just a series of images. We can then move on to running our pipeline on an input video frame-by-frame as a final solution to the original problem of processing an entire video for lane detection.
+
+For example, let’s take the single image frame below.
+
+
+A sample input image frame.
+In the above image, the lane markers are obvious to any human observer. We perform processing of this image intuitively, and after being trained to drive a human can detect the lane in which the vehicle appears to be moving. Humans also effortlessly identify many other objects in the scene, such as the other vehicles, the embankment near the right shoulder, some road signs alongside the road, and even the mountains visible on the horizon. While many of these objects are complex in visual structure, it could be said that the lane markers are actually some of the simplest structures in the image!
+
+Pre-existing knowledge of driving gives us certain assumptions about the properties and structure of a lane, further simplifying the problem. One obvious assumption is that the lane is oriented to be parallel with the direction of movement. This being the case, the lines denoting the lane will tend to extend from the foreground of an image into the background along paths that are angled slightly inwards. We can also assume that the lines will never quite reach the horizon, either disappearing with distance or being obscured by some other image feature along the way.
+
+One very simple filter on the image could be to crop out all of the areas which we believe will never contain information about the lane markers. We’ll kick off our project by writing the code necessary to do a simple crop of the region of interest.
+
+Cropping to a Region of Interest
+Loading an Image into Memory
+The very first thing we must do before we can process an image is… read an image! The following snippet can be used to load an image from a file into an array of image data which can be manipulated in python:
+
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+# reading in an image
+image = mpimg.imread('solidWhiteCurve.jpg')
+# printing out some stats and plotting the image
+print('This image is:', type(image), 'with dimensions:', image.shape)
+plt.imshow(image)
+plt.show()
+In this code, we import the necessary library modules, load an image into memory, print some stats about the image, and display it in a plot, as below:
+
+$ python load_image.py
+This image is: <class 'numpy.ndarray'> with dimensions: (540, 960, 3)
+
+A simple test image which we can use for analysis.
+Great! Now we have an image in memory which we can now manipulate however we like in our python script. The image has dimensions (540, 960, 3), representing the height, width, and three color channels of the image, respectively. This image will be the example we use for testing our algorithm throughout this post.
+
+Defining the Region of Interest
+Next, we’ll define a set of points which describe the region of interest we want to crop out of the original.
+
+If you have worked with computer graphics before (or even if you paid close attention to the plotted image above!), you realize that the point (0, 0) (the origin) is actually in the upper left corner of the image. This is not exactly intuitive for most people, because general mathematics education tends to only show coordinate systems starting with the origin in the bottom left corner. That being said, this will not cause a lot of complications at this stage aside from the fact that the y coordinates of our region of interest will be specified by their distance from the top of the image rather than from the bottom.
+
+We want a region of interest that fully contains the lane lines. One simple shape that will achieve this goal is a triangle that begins at the bottom left corner of the image, proceeds to the center of the image at the horizon, and then follows another edge to the bottom right corner of the image. Those vertices are defined as follows:
+
+region_of_interest_vertices = [
+    (0, height),
+    (width / 2, height / 2),
+    (width, height),
+]
+Cropping the Region of Interest
+To actually do the cropping of the image, we’ll define a utility function region_of_interest():
+
+import numpy as np
+import cv2
+def region_of_interest(img, vertices):
+    # Define a blank matrix that matches the image height/width.
+    mask = np.zeros_like(img)
+    # Retrieve the number of color channels of the image.
+    channel_count = img.shape[2]
+    # Create a match color with the same color channel counts.
+    match_mask_color = (255,) * channel_count
+      
+    # Fill inside the polygon
+    cv2.fillPoly(mask, vertices, match_mask_color)
+    
+    # Returning the image only where mask pixels match
+    masked_image = cv2.bitwise_and(img, mask)
+    return masked_image
+And then we’ll run the cropping function on our image before showing it again (output below):
+
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+region_of_interest_vertices = [
+    (0, height),
+    (width / 2, height / 2),
+    (width, height),
+]
+image = mpimg.imread('solidWhiteCurve.jpg')
+cropped_image = region_of_interest(
+    image,
+    np.array([region_of_interest_vertices], np.int32),
+)
+plt.figure()
+plt.imshow(cropped_image)
+plt.show()
+
+Cropped image with most of the peripheral objects removed!
+Detecting Edges in the Cropped Image
+Now we have a cropped image to work with, in less than 2o lines of code! Even better, we have used a fairly simple shape and yet still managed to remove almost all of the objects from the image that are unrelated to the lane or lane markings.
+
+The next part of our pipeline will be detecting shape edges in the remaining (cropped) image data. We need a bit of mathematical theory to get an intuition about what is happening in this part, but I’m not going to get too technical on the concepts. Interested readers can follow the links provided to learn more.
+
+Mathematics of Edge Detection
+First, a question that will help us build an intuition about the process of edge detection:
+
+In terms of the mathematical information in an image (a matrix of data), what actually defines an edge?
+
+To answer that question, let’s look closely at a lane marking that we hope to detect.
+
+
+A lane marking with a highlighted section illustrating the gradient of an edge.
+If we pay close attention to the data surrounding this edge, it is fairly intuitive to conclude that edges are simply the areas of an image where the color values change very quickly. Therefore, detecting edges in an image becomes a mathematics problem of detecting any area where a pixel is a mismatch in color to all of its neighbors.
+
+Fortunately for us, this mathematics problem is very solvable. In fact, computer scientist John F. Canny invented an algorithm to do just that, using calculus of variations to achieve his solution. For those of you that have studied calculus before, it will be sensible that Canny Edge Detection essentially detects areas of the image that have a strong gradient in the image’s color function. Canny also adds a pair of intensity threshold parameters which indicate generally how strong an edge must be to be detected. See this video for a good explanation.
+
+Grayscale Conversion and Canny Edge Detection
+We don’t actually care about the colors of the picture at all, just the differences between their intensity values. In order to make the edge detection process simpler, we can convert the image into grayscale. This will remove color information and replace it with a single intensity value for each pixel of the image. Now our solution is to use Canny Edge Detection to find areas of the image that rapidly change over the intensity value.
+
+For those of us that aren’t interested writing this algorithm ourselves, OpenCV ships with a single call implementation ready to use. Let’s try running the Canny Edge Detection algorithm on our cropped image with some reasonable starter thresholds.
+
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+import numpy as np
+import cv2
+import math
+def region_of_interest(img, vertices):
+    mask = np.zeros_like(img)
+    channel_count = img.shape[2]
+    match_mask_color = (255,) * channel_count
+    cv2.fillPoly(mask, vertices, match_mask_color)
+    masked_image = cv2.bitwise_and(img, mask)
+    return masked_image
+region_of_interest_vertices = [
+    (0, height),
+    (width / 2, height / 2),
+    (width, height),
+]
+image = mpimg.imread('solidWhiteCurve.jpg')
+cropped_image = region_of_interest(
+    image,
+    np.array([region_of_interest_vertices], np.int32),
+)
+plt.figure()
+plt.imshow(cropped_image)
+# Convert to grayscale here.
+gray_image = cv2.cvtColor(cropped_image, cv2.COLOR_RGB2GRAY)
+# Call Canny Edge Detection here.
+cannyed_image = cv2.Canny(gray_image, 100, 200)
+plt.figure()
+plt.imshow(cannyed_image)
+plt.show()
+
+Our cropped image with edges shown as a series of many single pixels.
+We did it!, the image now contains only the single pixels which are indicative of an edge. But there’s a problem… We accidentally detected the edges of our cropped region of interest!
+
+Not to worry, we can fix this problem by simply place the region of interest cropping after the Canny process in our pipeline. We also need to adjust the region of interest utility function to account for the fact that our image is now grayscale:
+
+def region_of_interest(img, vertices):
+    mask = np.zeros_like(img)
+    match_mask_color = 255 # <-- This line altered for grayscale.
+    
+    cv2.fillPoly(mask, vertices, match_mask_color)
+    masked_image = cv2.bitwise_and(img, mask)
+    return masked_image
+region_of_interest_vertices = [
+    (0, height),
+    (width / 2, height / 2),
+    (width, height),
+]
+image = mpimg.imread('solidWhiteCurve.jpg')
+plt.figure()
+plt.imshow(image)
+plt.show()
+gray_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+cannyed_image = cv2.Canny(gray_image, 100, 200)
+# Moved the cropping operation to the end of the pipeline.
+cropped_image = region_of_interest(
+    cannyed_image,
+    np.array([region_of_interest_vertices], np.int32)
+)
+plt.figure()
+plt.imshow(cropped_image)
+plt.show()
+Now let’s run our pipeline once more.
+
+
+Cropping after running Canny Edge Detection.
+Generating Lines from Edge Pixels
+Perfect! This looks like a pretty good start for detecting the lane markings. It appears, in our output image, that the most prominent features of our processed image are indeed the lane markings. Now that we have the image processed down to a set of pixels representing edges, we need to link these pixels together to generate a list of lines. This is another problem that can be solved using some rather complicated mathematics theory. Don’t worry; we’ll stay on the surface level, again, unless you want to follow the links.
+
+Mathematics of Line Detection
+To get an intuition about the problem, let’s think about a similar question to the one that we posed about edge detection:
+
+In terms of the mathematical information in an image (a matrix of data), what actually defines a line?
+
+We have an image consisting of mostly blank pixels and a few scattered ‘edge pixels’ that have no known structure, but can easily be recognized as a line to a human observer. To answer our question, let’s take another look at the same lane marking from the edge detection example.
+
+
+The same lane marking example, post edge detection. Line candidates marked in blue.
+If we pay close attention to a region that appears to be a line, we find that the edge pixels have something in common. We can imagine all the possible lines that pass through each pixel, but the points share only a few lines in common. These common lines can be thought of as candidates for the actual line (if it exists) that passes through all of the nearby edge pixels.
+
+We have changed the difficult problem of interpreting many lines out of an entire image matrix of edge pixels and zeros into the much simpler problem of discovering lines which intersect multiple edge pixels at once. Although this is an easier problem, trial and error will not work. There are infinitely many lines that pass through each of the edge pixels, so we cannot simply test all of the lines to see if they match many of the pixels around a selected pixel. We can, however, use a mathematical trick to transform the input in such a way that there is a single solution for each line that we do want to discover.
+
+The main concept we will be using here is called a Hough Transform. Using a Hough Transform, we will transform all of our edge pixels into a different mathematical form. Once the transformation is complete, each edge pixel in “Image Space” will have become a line or curve in “Hough Space”. In Hough Space, each line represents a point from Image Space, and each point represents a line from Image Space. For a detailed explanation of this concept, check out this video.
+
+
+An illustration of an Image Space and it’s corresponding Hough Space (slope-intercept parameters). (Source)
+We do not need to cover more detail about the mathematics involved in performing the Hough Transform. It is enough to know that this greatly simplifies the problem we need to solve.
+
+To the point, we now do not need to solve for a line that intersects all nearby edge pixels. Instead, we can simply solve for the intersections between lines in Hough Space, and transform that intersection point back into Image Space to obtain a line which intersects enough edge pixels. The inputs to the Hough Transform can be varied to alter which lines are considered a real feature of the scene and which are just clutter.
+
+Using Hough Transforms to Detect Lines
+Fortunately for us, OpenCV ships with a function for generating Hough lines from an image containing edge pixels. We will run this algorithm on our image with some reasonable parameters. This will generate a listing of all the lines believed by the Hough Transform to be a part of the scene and not a bit of clutter from the previous edge detection step.
+
+...
+image = mpimg.imread('solidWhiteCurve.jpg')
+gray_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+cannyed_image = cv2.Canny(gray_image, 200, 300)
+cropped_image = region_of_interest(
+    cannyed_image,
+    np.array(
+        [region_of_interest_vertices],
+        np.int32
+    ),
+)
+lines = cv2.HoughLinesP(
+    cropped_image,
+    rho=6,
+    theta=np.pi / 60,
+    threshold=160,
+    lines=np.array([]),
+    minLineLength=40,
+    maxLineGap=25
+)
+print(lines)
+The printout of the detected lines will be similar to below:
+
+$ python load_image.py
+
+[[[486 312 877 538]]
+[[724 441 831 502]]
+...
+[[386 382 487 309]]]
+Each line is represented by four numbers, which are the two endpoints of the detected line segment, like so
+
+[x1, y1, x2, y2]
+If we tweak the rho, theta, threshold, minLineLength, and maxLineGap parameters, we can detect many different kinds of lines within the image data. I encourage you to play with the values of these parameters at the end of this section of the article to see the effects that they have on line detection for yourself.
+
+Rendering Detected Hough Lines as an Overlay
+The last thing we will do with line detection is render the detected lines back onto the image itself, to give us a sense of the real features in the scene which are being detected. For this rendering, we’ll need to write another utility function:
+
+def draw_lines(img, lines, color=[255, 0, 0], thickness=3):
+    # If there are no lines to draw, exit.
+        if lines is None:
+            return
+    # Make a copy of the original image.
+    img = np.copy(img)
+    # Create a blank image that matches the original in size.
+    line_img = np.zeros(
+        (
+            img.shape[0],
+            img.shape[1],
+            3
+        ),
+        dtype=np.uint8,
+    )
+    # Loop over all lines and draw them on the blank image.
+    for line in lines:
+        for x1, y1, x2, y2 in line:
+            cv2.line(line_img, (x1, y1), (x2, y2), color, thickness)
+    # Merge the image with the lines onto the original.
+    img = cv2.addWeighted(img, 0.8, line_image, 1.0, 0.0)
+    # Return the modified image.
+    return img
+And then we’ll use this utility function inside of our processing script.
+
+...
+image = mpimg.imread('solidWhiteCurve.jpg')
+plt.figure()
+plt.imshow(image)
+plt.show()
+gray_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+cannyed_image = cv2.Canny(gray_image, 100, 200)
+cropped_image = region_of_interest(
+    cannyed_image,
+    np.array(
+        [region_of_interest_vertices],
+        np.int32
+    ),
+)
+lines = cv2.HoughLinesP(
+    cropped_image,
+    rho=6,
+    theta=np.pi / 60,
+    threshold=160,
+    lines=np.array([]),
+    minLineLength=40,
+    maxLineGap=25
+)
+line_image = draw_lines(image, lines) # <---- Add this call.
+plt.figure()
+plt.imshow(line_image)
+plt.show()
+
+Output of our pipeline once we have rendered the detected lines back onto the original image.
+Awesome! Now we have a copy of the original with the detected lines rendered as an overlay. This is very cool, but we want to distinguish the left and right lane lines independently and show a single line for each. In the next section, we’ll create a single line for each group of detected lane markings.
+
+Creating a Single Left and Right Lane Line
+The final step in our pipeline will be to create only one line for each of the groups of lines we found in the last step. This can be done by fitting a simple linear model to the various endpoints of the line segments in each group, then rendering a single overlay line on that linear model.
+
+Grouping the Lines into Left and Right Groups
+First, though, we need to determine which lines are in the left group, and which are in the right group.
+
+For those who have taken algebra, one obvious difference between the two groups of line segments is the direction of their slope. The slope of a line measures the angle of that line, with a horizontal line having a slope of 0 and a vertical line having a slope of ∞. Almost all of the lines we will detect will have a slope somewhere in between these two values, because they are angled from the bottom of the image towards the center at the horizon.
+
+Most importantly, the direction of a line’s slope describes whether the line is moving up or down as you travel along the line from left to right. A line with negative slope is said to be traveling downwards, while a line with positive slope is said to be traveling upwards. This is how slope direction works in normal coordinate systems where the origin is at the bottom left corner. In our coordinate system, however, the origin is in the top left corner, and so our slope directions will be reversed, with negative slopes traveling upwards and positive slopes traveling downwards.
+
+In our images, the left lane markings all have a negative slope, meaning the lines travel upwards towards the horizon as we move from left to right along the lines. On the other hand, all of our right lane markings have a positive slope, traveling downwards towards the bottom of the image as we move along them from left to right. This will be the distinction we use to group the left and right lines. Furthermore, the lane markings appear extreme in slope, so we will not consider any line with a slope absolute value less than 0.5. This means that we’ll reject any line which doesn’t move quickly towards the horizon or the bottom of the image, leaving only lines which are nearer to vertical than horizontal.
+
+...
+left_line_x = []
+left_line_y = []
+right_line_x = []
+right_line_y = []
+for line in lines:
+    for x1, y1, x2, y2 in line:
+        slope = (y2 - y1) / (x2 - x1) # <-- Calculating the slope.
+        if math.fabs(slope) < 0.5: # <-- Only consider extreme slope
+            continue
+        if slope <= 0: # <-- If the slope is negative, left group.
+            left_line_x.extend([x1, x2])
+            left_line_y.extend([y1, y2])
+        else: # <-- Otherwise, right group.
+            right_line_x.extend([x1, x2])
+            right_line_y.extend([y1, y2])
+In this snippet, we loop over all of the lines we’ve detected and calculate their slope. If the slope is not extreme enough to be a lane marking edge, we will not consider it at all, and continue the loop without handling that line. If the slope is negative, the line belongs to the left lane markings group. If the slope is positive, the line belongs to the right group. To add a line to either group, we add the various x and y endpoint coordinates to lists for each side.
+
+Creating a Single Linear Representation of each Line Group
+The second challenge in our single line creation problem is to average the lines in each group into a single line that fits pretty closely in orientation and location in the image.
+
+Think about known values that we can work from to generate the left and right lane lines. Two known values are the y values for the top and bottom endpoints of the segments, which both lane lines will hold in common. We want the lines to begin at the bottom of the image, and travel along the lane markings towards the horizon, ending just below the horizon. The problem then becomes an exercise of finding the correct x values for each point of the two line segments.
+
+min_y = image.shape[0] * (3 / 5) # <-- Just below the horizon
+max_y = image.shape[0] # <-- The bottom of the image
+In order to find the correct x values for the top and bottom points of each line, we can develop two functions f(y) = x that define the left and right lines. Then we can feed the two common y values into the functions to find the x values that complete our endpoint coordinates. This function needs to be a linear fit to the coordinates in each group in order to average our detected lines, and fortunately numpy provides some functions to do it!
+
+The polyfit and poly1d operations can generate a linear function that match the two given spaces (x and y) for each group.
+
+...
+poly_left = np.poly1d(np.polyfit(
+    left_line_y,
+    left_line_x,
+    deg=1
+))
+left_x_start = int(poly_left(max_y))
+left_x_end = int(poly_left(min_y))
+poly_right = np.poly1d(np.polyfit(
+    right_line_y,
+    right_line_x,
+    deg=1
+))
+right_x_start = int(poly_right(max_y))
+right_x_end = int(poly_right(min_y))
+Now we can use these lines as our input to the draw_lines function in our pipeline:
+
+...
+image = mpimg.imread('solidWhiteCurve.jpg')
+plt.figure()
+plt.imshow(image)
+gray_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+cannyed_image = cv2.Canny(gray_image, 100, 200)
+cropped_image = region_of_interest(
+    cannyed_image,
+    np.array(
+        [region_of_interest_vertices],
+        np.int32
+    ),
+)
+lines = cv2.HoughLinesP(
+    cropped_image,
+    rho=6,
+    theta=np.pi / 60,
+    threshold=160,
+    lines=np.array([]),
+    minLineLength=40,
+    maxLineGap=25
+)
+left_line_x = []
+left_line_y = []
+right_line_x = []
+right_line_y = []
+for line in lines:
+    for x1, y1, x2, y2 in line:
+        slope = (y2 - y1) / (x2 - x1) # <-- Calculating the slope.
+        if math.fabs(slope) < 0.5: # <-- Only consider extreme slope
+            continue
+        if slope <= 0: # <-- If the slope is negative, left group.
+            left_line_x.extend([x1, x2])
+            left_line_y.extend([y1, y2])
+        else: # <-- Otherwise, right group.
+            right_line_x.extend([x1, x2])
+            right_line_y.extend([y1, y2])
+min_y = image.shape[0] * (3 / 5) # <-- Just below the horizon
+max_y = image.shape[0] # <-- The bottom of the image
+poly_left = np.poly1d(np.polyfit(
+    left_line_y,
+    left_line_x,
+    deg=1
+))
+left_x_start = int(poly_left(max_y))
+left_x_end = int(poly_left(min_y))
+poly_right = np.poly1d(np.polyfit(
+    right_line_y,
+    right_line_x,
+    deg=1
+))
+right_x_start = int(poly_right(max_y))
+right_x_end = int(poly_right(min_y))
+line_image = draw_lines(
+    image,
+    [[
+        [left_x_start, max_y, left_x_end, min_y],
+        [right_x_start, max_y, right_x_end, min_y],
+    ]],
+    thickness=5,
+)
+plt.figure()
+plt.imshow(line_image)
+plt.show()
+
+The final overlay of our two single lane lines.
+We did it!
+
+Level Up: Annotate a Video
+Now that we have an image processing pipeline to work with, we can actually apply the same techniques to a video to overlay our lane lines upon the video! We’ll use a test video which contains the image we have been working with above.
+
+First, let’s put all of our current work into a defined function named pipeline().
+
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+import numpy as np
+import cv2
+import math
+def region_of_interest(img, vertices):
+    mask = np.zeros_like(img)
+    match_mask_color = 255
+    cv2.fillPoly(mask, vertices, match_mask_color)
+    masked_image = cv2.bitwise_and(img, mask)
+    return masked_image
+def draw_lines(img, lines, color=[255, 0, 0], thickness=3):
+    line_img = np.zeros(
+        (
+            img.shape[0],
+            img.shape[1],
+            3
+        ),
+        dtype=np.uint8
+    )
+    img = np.copy(img)
+    if lines is None:
+        return
+    for line in lines:
+        for x1, y1, x2, y2 in line:
+            cv2.line(line_img, (x1, y1), (x2, y2), color, thickness)
+    img = cv2.addWeighted(img, 0.8, line_img, 1.0, 0.0)
+    return img
+def pipeline(image):
+    """
+    An image processing pipeline which will output
+    an image with the lane lines annotated.
+    """
+    height = image.shape[0]
+    width = image.shape[1]
+    region_of_interest_vertices = [
+        (0, height),
+        (width / 2, height / 2),
+        (width, height),
+    ]
+    gray_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    cannyed_image = cv2.Canny(gray_image, 100, 200)
+ 
+    cropped_image = region_of_interest(
+        cannyed_image,
+        np.array(
+            [region_of_interest_vertices],
+            np.int32
+        ),
+    )
+ 
+    lines = cv2.HoughLinesP(
+        cropped_image,
+        rho=6,
+        theta=np.pi / 60,
+        threshold=160,
+        lines=np.array([]),
+        minLineLength=40,
+        maxLineGap=25
+    )
+ 
+    left_line_x = []
+    left_line_y = []
+    right_line_x = []
+    right_line_y = []
+ 
+    for line in lines:
+        for x1, y1, x2, y2 in line:
+            slope = (y2 - y1) / (x2 - x1)
+    if math.fabs(slope) < 0.5:
+        continue
+    if slope <= 0:
+        left_line_x.extend([x1, x2])
+        left_line_y.extend([y1, y2])
+    else:
+        right_line_x.extend([x1, x2])
+        right_line_y.extend([y1, y2])
+    min_y = int(image.shape[0] * (3 / 5))
+    max_y = int(image.shape[0])
+    poly_left = np.poly1d(np.polyfit(
+        left_line_y,
+        left_line_x,
+        deg=1
+    ))
+ 
+    left_x_start = int(poly_left(max_y))
+    left_x_end = int(poly_left(min_y))
+ 
+    poly_right = np.poly1d(np.polyfit(
+        right_line_y,
+        right_line_x,
+       deg=1
+    ))
+ 
+    right_x_start = int(poly_right(max_y))
+    right_x_end = int(poly_right(min_y))
+    line_image = draw_lines(
+        image,
+        [[
+            [left_x_start, max_y, left_x_end, min_y],
+            [right_x_start, max_y, right_x_end, min_y],
+        ]],
+        thickness=5,
+    )
+    return line_image
+And then we can write a video processing pipeline:
+
+from moviepy.editor import VideoFileClip
+from IPython.display import HTML
+white_output = 'solidWhiteRight_output.mp4'
+clip1 = VideoFileClip("solidWhiteRight_input.mp4")
+white_clip = clip1.fl_image(pipeline)
+white_clip.write_videofile(white_output, audio=False)
+After the video is finished processing, you should be able to open your video and have it match very nearly to the one below. Congratulations!
+

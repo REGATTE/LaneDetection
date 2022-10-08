@@ -24,15 +24,7 @@ def calibrate(filename, silent = True):
             img = mpimg.imread(os.path.join(imagesPath, image_file))
             img_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
             found, corners = cv2.findChessboardCorners(img_gray, (cam_x, cam_y))
-            if found:
-       
-                cv2.drawChessboardCorners(img, (cam_x, cam_y), corners, found)
-                corners2 = cv2.cornerSubPix(img_gray, corners, (11, 11), (-1, -1), term_criteria)
-                image_points.append(corners2)
-                obj_dot.append(objp)
-                if not silent:
-                    plt.imshow(img)
-                    plt.show()
+
 
     
     ret, matrix, distance, rvecs, tvecs = cv2.calibrateCamera(obj_dot, image_points, img_gray.shape[::-1], None, None)
